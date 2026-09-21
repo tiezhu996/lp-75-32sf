@@ -35,8 +35,9 @@ async function proxyRequest(requestData: ProxyRequestData): Promise<ProxyRespons
 
   const requestHeaders: Record<string, string> = {};
   headers.forEach((header) => {
-    if (header.enabled && header.key.trim()) {
-      requestHeaders[header.key] = header.value;
+    const key = header.key.trim();
+    if (header.enabled && key) {
+      requestHeaders[key] = header.value;
     }
   });
 

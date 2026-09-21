@@ -42,6 +42,7 @@ export interface Collection {
   userId: string;
   name: string;
   description?: string;
+  defaultHeaders?: Header[];
   createdAt: string;
   updatedAt: string;
 }

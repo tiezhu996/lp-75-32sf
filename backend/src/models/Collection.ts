@@ -1,9 +1,11 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { IHeader } from './ApiEndpoint';
 
 export interface ICollection extends Document {
   userId: mongoose.Types.ObjectId;
   name: string;
   description?: string;
+  defaultHeaders: IHeader[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,6 +28,13 @@ const CollectionSchema: Schema = new Schema(
       trim: true,
       maxlength: 500,
     },
+    defaultHeaders: [
+      {
+        key: { type: String, trim: true },
+        value: { type: String, trim: true },
+        enabled: { type: Boolean, default: true },
+      },
+    ],
   },
   {
     timestamps: true,

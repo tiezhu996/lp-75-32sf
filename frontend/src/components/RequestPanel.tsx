@@ -13,6 +13,7 @@ import {
   Typography,
   Empty,
   Popconfirm,
+  Modal,
 } from 'antd';
 import {
   SendOutlined,
@@ -40,7 +41,8 @@ import {
   deleteEndpoint,
 } from '../api/endpoints';
 import { sendRequest } from '../api/proxy';
-import { replaceEnvVariables } from '../utils/environment';
+import { replaceEnvVariables, extractEnvVariables } from '../utils/environment';
+import { prepareOutgoingHeaders } from '../utils/headers';
 import { tryFormatJson, isValidJson } from '../utils/json';
 
 const { Content } = Layout;
@@ -73,6 +75,7 @@ interface RequestPanelProps {
 
 const RequestPanel = ({
   collectionId,
+  collections,
   activeEnvironment,
   initialConfig,
 }: RequestPanelProps) => {
@@ -87,6 +90,10 @@ const RequestPanel = ({
   const [response, setResponse] = useState<ProxyResponse | null>(null);
   const [endpointName, setEndpointName] = useState('');
   const [showNameInput, setShowNameInput] = useState(false);
+
+  // 当前集合及其默认请求头（发送时实时读取，默认变更只影响后续发送）
+  const activeCollection = collections.find((c) => c._id === collectionId) || null;
+  const inheritedHeaders = activeCollection?.defaultHeaders || [];
 
   useEffect(() => {
     if (collectionId) {
@@ -163,15 +170,66 @@ const RequestPanel = ({
       return;
     }
 
+    // 集合默认请求头（发送时实时读取，默认变更只影响后续发送）
+    const defaultHeaders = activeCollection?.defaultHeaders || [];
+
+    // 1. 按当前环境展开变量
+    const resolvedUrl = replaceEnvVariables(url, activeEnvironment);
+    const resolvedBody = replaceEnvVariables(body, activeEnvironment);
+    const expandedDefaults = defaultHeaders.map((h) => ({
+      ...h,
+      key: replaceEnvVariables(h.key, activeEnvironment),
+      value: replaceEnvVariables(h.value, activeEnvironment),
+    }));
+    const expandedEndpointHeaders = headers.map((h) => ({
+      ...h,
+      key: replaceEnvVariables(h.key, activeEnvironment),
+      value: replaceEnvVariables(h.value, activeEnvironment),
+    }));
+
+    // 2. 默认头与接口头按名称忽略大小写合并
+    const { headers: mergedHeaders, errors: headerErrors } = prepareOutgoingHeaders(
+      expandedDefaults,
+      expandedEndpointHeaders
+    );
+
+    // 3. 变量缺失或合并结果无效时阻止整次发送并列出原因
+    const errors: string[] = [];
+    const missingVariables = new Set<string>();
+    [resolvedUrl, resolvedBody, ...mergedHeaders.flatMap((h) => [h.key, h.value])].forEach(
+      (text) => {
+        extractEnvVariables(text).forEach((name) => missingVariables.add(name));
+      }
+    );
+    missingVariables.forEach((name) => {
+      errors.push(`环境变量缺失：{{${name}}} 在当前环境中未定义`);
+    });
+    headerErrors.forEach((error) => errors.push(error));
+
+    if (errors.length > 0) {
+      Modal.error({
+        title: '请求未发送',
+        content: (
+          <div>
+            <p style={{ marginBottom: 8 }}>请先解决以下问题：</p>
+            <ul style={{ paddingLeft: 20, margin: 0 }}>
+              {errors.map((error, index) => (
+                <li key={index}>{error}</li>
+              ))}
+            </ul>
+          </div>
+        ),
+      });
+      return;
+    }
+
     try {
       setSending(true);
-      const resolvedUrl = replaceEnvVariables(url, activeEnvironment);
-
       const result = await sendRequest({
         method,
         url: resolvedUrl,
-        headers,
-        body,
+        headers: mergedHeaders,
+        body: resolvedBody,
       });
 
       setResponse(result);
@@ -243,7 +301,7 @@ const RequestPanel = ({
       dataIndex: 'enabled',
       key: 'enabled',
       width: 60,
-      render: (enabled: boolean, record: { index: number; enabled: boolean; key: number; value: string }) => (
+      render: (enabled: boolean, record: { index: number; enabled: boolean; key: string; value: string }) => (
         <input
           type="checkbox"
           checked={enabled}
@@ -257,7 +315,7 @@ const RequestPanel = ({
       dataIndex: 'key',
       key: 'key',
       width: '35%',
-      render: (key: string, record: { index: number; enabled: boolean; key: number; value: string }) => (
+      render: (key: string, record: { index: number; enabled: boolean; key: string; value: string }) => (
         <Input
           placeholder="Header Key"
           value={key}
@@ -271,7 +329,7 @@ const RequestPanel = ({
       dataIndex: 'value',
       key: 'value',
       width: '50%',
-      render: (value: string, record: { index: number; enabled: boolean; key: number; value: string }) => (
+      render: (value: string, record: { index: number; enabled: boolean; key: string; value: string }) => (
         <Input
           placeholder="Header Value"
           value={value}
@@ -355,9 +413,37 @@ const RequestPanel = ({
       label: 'Headers',
       children: (
         <div style={{ padding: 16 }}>
+          {inheritedHeaders.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+                继承自集合「{activeCollection?.name}」的默认请求头（发送时按名称合并：接口同名覆盖、留空剔除、禁用不发送）
+              </Text>
+              <Table
+                dataSource={inheritedHeaders.map((h, i) => ({ ...h, index: i }))}
+                rowKey="index"
+                columns={[
+                  { title: 'Key', dataIndex: 'key', key: 'key', width: '35%' },
+                  { title: 'Value', dataIndex: 'value', key: 'value', width: '50%' },
+                  {
+                    title: '状态',
+                    dataIndex: 'enabled',
+                    key: 'enabled',
+                    render: (enabled: boolean) => (
+                      <Tag color={enabled ? 'green' : 'default'}>
+                        {enabled ? '启用' : '禁用'}
+                      </Tag>
+                    ),
+                  },
+                ]}
+                pagination={false}
+                size="small"
+              />
+            </div>
+          )}
           <Table
             columns={headerColumns}
-            dataSource={headers.map((h, i) => ({ ...h, index: i, key: i }))}
+            dataSource={headers.map((h, i) => ({ ...h, index: i }))}
+            rowKey="index"
             pagination={false}
             size="small"
             locale={{ emptyText: '暂无 Headers，点击下方按钮添加' }}
