@@ -1,9 +1,16 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
+export interface IDefaultHeader {
+  key: string;
+  value: string;
+  enabled: boolean;
+}
+
 export interface ICollection extends Document {
   userId: mongoose.Types.ObjectId;
   name: string;
   description?: string;
+  defaultHeaders: IDefaultHeader[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,6 +33,14 @@ const CollectionSchema: Schema = new Schema(
       trim: true,
       maxlength: 500,
     },
+    defaultHeaders: [
+      {
+        _id: false,
+        key: { type: String, trim: true },
+        value: { type: String },
+        enabled: { type: Boolean, default: true },
+      },
+    ],
   },
   {
     timestamps: true,

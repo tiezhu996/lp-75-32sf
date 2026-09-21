@@ -7,12 +7,13 @@ import {
   Button,
   Tabs,
   Table,
-  message,
+  Modal,
   Tag,
   Space,
   Typography,
   Empty,
   Popconfirm,
+  Alert,
 } from 'antd';
 import {
   SendOutlined,
@@ -23,8 +24,10 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   ReloadOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import Editor from '@monaco-editor/react';
+import { AxiosError } from 'axios';
 import {
   Collection,
   ApiEndpoint,
@@ -39,9 +42,12 @@ import {
   updateEndpoint,
   deleteEndpoint,
 } from '../api/endpoints';
+import { updateCollection } from '../api/collections';
 import { sendRequest } from '../api/proxy';
-import { replaceEnvVariables } from '../utils/environment';
+import { resolveWithMissingVariables } from '../utils/environment';
+import { mergeDefaultHeaders } from '../utils/headers';
 import { tryFormatJson, isValidJson } from '../utils/json';
+import HeaderEditor from './HeaderEditor';
 
 const { Content } = Layout;
 const { Option } = Select;
@@ -69,12 +75,30 @@ interface RequestPanelProps {
     headers: Header[];
     body?: string;
   } | null;
+  onRefreshCollections: () => void;
+}
+
+function getErrorReasons(error: unknown): string[] {
+  const axiosError = error as AxiosError<{ message?: string; details?: string[] }>;
+  const data = axiosError?.response?.data;
+  if (data?.details && data.details.length > 0) {
+    return data.details;
+  }
+  if (data?.message) {
+    return [data.message];
+  }
+  if (error instanceof Error && error.message) {
+    return [error.message];
+  }
+  return ['请求失败'];
 }
 
 const RequestPanel = ({
   collectionId,
+  collections,
   activeEnvironment,
   initialConfig,
+  onRefreshCollections,
 }: RequestPanelProps) => {
   const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
   const [selectedEndpoint, setSelectedEndpoint] = useState<ApiEndpoint | null>(null);
@@ -87,6 +111,13 @@ const RequestPanel = ({
   const [response, setResponse] = useState<ProxyResponse | null>(null);
   const [endpointName, setEndpointName] = useState('');
   const [showNameInput, setShowNameInput] = useState(false);
+  const [defaultModalVisible, setDefaultModalVisible] = useState(false);
+  const [defaultHeadersDraft, setDefaultHeadersDraft] = useState<Header[]>([]);
+  const [savingDefaults, setSavingDefaults] = useState(false);
+
+  const activeCollection = collectionId
+    ? collections.find((c) => c._id === collectionId) || null
+    : null;
 
   useEffect(() => {
     if (collectionId) {
@@ -124,24 +155,6 @@ const RequestPanel = ({
     setResponse(null);
   }, []);
 
-  const handleAddHeader = () => {
-    setHeaders([...headers, { key: '', value: '', enabled: true }]);
-  };
-
-  const handleRemoveHeader = (index: number) => {
-    const newHeaders = [...headers];
-    newHeaders.splice(index, 1);
-    setHeaders(newHeaders);
-  };
-
-  const handleUpdateHeader = (index: number, field: 'key' | 'value' | 'enabled', value: string | boolean) => {
-    const newHeaders = [...headers];
-    if (newHeaders[index]) {
-      newHeaders[index][field] = value as never;
-      setHeaders(newHeaders);
-    }
-  };
-
   const handleFormatBody = () => {
     setBody(tryFormatJson(body));
   };
@@ -159,24 +172,99 @@ const RequestPanel = ({
 
   const handleSend = async () => {
     if (!url.trim()) {
-      message.error('请输入请求 URL');
+      Modal.warning({
+        title: '无法发送请求',
+        content: '请输入请求 URL',
+      });
+      return;
+    }
+
+    // 1. URL 按当前环境展开变量
+    const resolvedUrlResult = resolveWithMissingVariables(url.trim(), activeEnvironment);
+
+    // 2. 默认头与接口头按名称忽略大小写合并（同时展开变量）
+    const merged = mergeDefaultHeaders(
+      activeCollection?.defaultHeaders || [],
+      headers,
+      activeEnvironment
+    );
+
+    // 3. 汇总所有阻止原因：变量缺失、合并结果无效
+    const reasons: string[] = [];
+    resolvedUrlResult.missing.forEach((name) => {
+      reasons.push(`URL 中变量 {{${name}}} 在当前环境缺失`);
+    });
+    reasons.push(...merged.errors);
+
+    if (resolvedUrlResult.value) {
+      try {
+        // eslint-disable-next-line no-new
+        new URL(resolvedUrlResult.value);
+      } catch {
+        reasons.push(`URL 不是合法地址：${resolvedUrlResult.value}`);
+      }
+    }
+
+    if (reasons.length > 0) {
+      Modal.error({
+        title: '请求未发送',
+        width: 520,
+        content: (
+          <div>
+            <Text type="secondary">以下问题导致本次发送被阻止：</Text>
+            <ul style={{ marginTop: 8, paddingLeft: 20, marginBottom: 0 }}>
+              {reasons.map((reason, index) => (
+                <li key={index} style={{ color: '#ff4d4f' }}>
+                  {reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ),
+      });
       return;
     }
 
     try {
       setSending(true);
-      const resolvedUrl = replaceEnvVariables(url, activeEnvironment);
-
       const result = await sendRequest({
         method,
-        url: resolvedUrl,
-        headers,
+        url: resolvedUrlResult.value,
+        // 发送的是合并后的最终请求头；禁用项已剔除
+        headers: merged.headers,
         body,
       });
 
       setResponse(result);
-      message.success('请求完成');
-    } catch {
+      Modal.success({
+        title: '请求完成',
+        width: 420,
+        content: (
+          <Space direction="vertical" size={4}>
+            <Text>状态：{result.status}，耗时 {result.duration}ms</Text>
+            {merged.removals.length > 0 && (
+              <Text type="secondary">已剔除默认头：{merged.removals.join('；')}</Text>
+            )}
+          </Space>
+        ),
+        okText: '知道了',
+      });
+    } catch (error) {
+      Modal.error({
+        title: '请求未发送',
+        width: 520,
+        content: (
+          <div>
+            <ul style={{ margin: 0, paddingLeft: 20 }}>
+              {getErrorReasons(error).map((reason, index) => (
+                <li key={index} style={{ color: '#ff4d4f' }}>
+                  {reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ),
+      });
     } finally {
       setSending(false);
     }
@@ -184,7 +272,7 @@ const RequestPanel = ({
 
   const handleSaveEndpoint = async () => {
     if (!collectionId) {
-      message.error('请先选择一个集合');
+      Modal.warning({ title: '无法保存', content: '请先选择一个集合' });
       return;
     }
 
@@ -203,7 +291,6 @@ const RequestPanel = ({
           headers,
           body,
         });
-        message.success('更新成功');
       } else {
         await createEndpoint({
           collectionId,
@@ -213,7 +300,6 @@ const RequestPanel = ({
           headers,
           body,
         });
-        message.success('保存成功');
       }
       await fetchEndpoints(collectionId);
       setShowNameInput(false);
@@ -228,7 +314,6 @@ const RequestPanel = ({
 
     try {
       await deleteEndpoint(selectedEndpoint._id);
-      message.success('删除成功');
       resetForm();
       if (collectionId) {
         await fetchEndpoints(collectionId);
@@ -237,64 +322,47 @@ const RequestPanel = ({
     }
   };
 
-  const headerColumns = [
-    {
-      title: '启用',
-      dataIndex: 'enabled',
-      key: 'enabled',
-      width: 60,
-      render: (enabled: boolean, record: { index: number; enabled: boolean; key: number; value: string }) => (
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={(e) => handleUpdateHeader(record.index, 'enabled', e.target.checked)}
-          style={{ cursor: 'pointer' }}
-        />
-      ),
-    },
-    {
-      title: 'Key',
-      dataIndex: 'key',
-      key: 'key',
-      width: '35%',
-      render: (key: string, record: { index: number; enabled: boolean; key: number; value: string }) => (
-        <Input
-          placeholder="Header Key"
-          value={key}
-          onChange={(e) => handleUpdateHeader(record.index, 'key', e.target.value)}
-          size="small"
-        />
-      ),
-    },
-    {
-      title: 'Value',
-      dataIndex: 'value',
-      key: 'value',
-      width: '50%',
-      render: (value: string, record: { index: number; enabled: boolean; key: number; value: string }) => (
-        <Input
-          placeholder="Header Value"
-          value={value}
-          onChange={(e) => handleUpdateHeader(record.index, 'value', e.target.value)}
-          size="small"
-        />
-      ),
-    },
-    {
-      title: '',
-      key: 'action',
-      width: 40,
-      render: (_: unknown, record: { index: number }) => (
-        <Button
-          type="text"
-          danger
-          size="small"
-          icon={<DeleteOutlined />}
-          onClick={() => handleRemoveHeader(record.index)}
-        />
-      ),
-    },
-  ];
+  const handleOpenDefaultModal = () => {
+    setDefaultHeadersDraft(
+      (activeCollection?.defaultHeaders || []).map((h) => ({ ...h }))
+    );
+    setDefaultModalVisible(true);
+  };
+
+  const handleSaveDefaultHeaders = async () => {
+    if (!activeCollection) return;
+    // 自动剔除未填写的空行（名称与值都为空）；其余交给后端严格校验
+    const cleanedHeaders = defaultHeadersDraft.filter(
+      (h) => h.key.trim() !== '' || h.value.trim() !== ''
+    );
+    try {
+      setSavingDefaults(true);
+      await updateCollection(activeCollection._id, {
+        defaultHeaders: cleanedHeaders,
+      });
+      onRefreshCollections();
+      setDefaultModalVisible(false);
+    } catch (error) {
+      // 校验失败（名称非法 / 同名重复）时后端拒绝保存，原配置不变
+      Modal.error({
+        title: '默认头保存失败，原配置未修改',
+        width: 520,
+        content: (
+          <div>
+            <ul style={{ margin: 0, paddingLeft: 20 }}>
+              {getErrorReasons(error).map((reason, index) => (
+                <li key={index} style={{ color: '#ff4d4f' }}>
+                  {reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ),
+      });
+    } finally {
+      setSavingDefaults(false);
+    }
+  };
 
   const responseTabItems = [
     {
@@ -355,22 +423,17 @@ const RequestPanel = ({
       label: 'Headers',
       children: (
         <div style={{ padding: 16 }}>
-          <Table
-            columns={headerColumns}
-            dataSource={headers.map((h, i) => ({ ...h, index: i, key: i }))}
-            pagination={false}
-            size="small"
-            locale={{ emptyText: '暂无 Headers，点击下方按钮添加' }}
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message={
+              activeCollection
+                ? `继承集合「${activeCollection.name}」的 ${activeCollection.defaultHeaders?.length || 0} 个默认头；同名头（忽略大小写）在此覆盖默认头，值留空则剔除默认头，禁用项不发送。`
+                : '未选择集合，本次发送不会继承任何默认头。'
+            }
           />
-          <Button
-            type="dashed"
-            onClick={handleAddHeader}
-            block
-            icon={<PlusOutlined />}
-            style={{ marginTop: 8 }}
-          >
-            添加 Header
-          </Button>
+          <HeaderEditor headers={headers} onChange={setHeaders} />
         </div>
       ),
     },
@@ -492,7 +555,7 @@ const RequestPanel = ({
               </Button>
             </div>
 
-            <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {showNameInput && (
                 <Input
                   value={endpointName}
@@ -530,6 +593,15 @@ const RequestPanel = ({
                 </Popconfirm>
               )}
               <Button onClick={resetForm}>重置</Button>
+              <Button
+                icon={<SafetyCertificateOutlined />}
+                onClick={handleOpenDefaultModal}
+                disabled={!activeCollection}
+              >
+                集合默认头{activeCollection?.defaultHeaders?.length
+                  ? `（${activeCollection.defaultHeaders.length}）`
+                  : ''}
+              </Button>
               {activeEnvironment && (
                 <Tag color="green">
                   环境: {activeEnvironment.name}
@@ -566,6 +638,33 @@ const RequestPanel = ({
           </div>
         </div>
       </div>
+
+      <Modal
+        title={`集合默认头 - ${activeCollection?.name || ''}`}
+        open={defaultModalVisible}
+        onCancel={() => setDefaultModalVisible(false)}
+        onOk={handleSaveDefaultHeaders}
+        confirmLoading={savingDefaults}
+        okText="保存默认头"
+        cancelText="取消"
+        width={680}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="默认头会被集合内所有接口继承：发送时与接口头按名称忽略大小写合并；接口同名值覆盖默认值，接口同名值留空则剔除默认头，禁用项不发送。名称非法或同名重复时将无法保存。"
+        />
+        <HeaderEditor
+          headers={defaultHeadersDraft}
+          onChange={setDefaultHeadersDraft}
+          keyPlaceholder="默认头 Key，如 X-Token"
+          valuePlaceholder="默认头 Value，支持 {{变量}}"
+          emptyText="暂无默认请求头"
+          addText="添加默认头"
+        />
+      </Modal>
     </Content>
   );
 };

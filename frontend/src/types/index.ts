@@ -3,6 +3,7 @@ export interface ApiResponse<T = unknown> {
   data?: T;
   message?: string;
   error?: string;
+  details?: string[];
 }
 
 export interface User {
@@ -42,6 +43,7 @@ export interface Collection {
   userId: string;
   name: string;
   description?: string;
+  defaultHeaders: Header[];
   createdAt: string;
   updatedAt: string;
 }

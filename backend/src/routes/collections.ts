@@ -1,8 +1,9 @@
 import { Router, Response } from 'express';
 import authMiddleware from '../middleware/auth';
-import Collection from '../models/Collection';
+import Collection, { IDefaultHeader } from '../models/Collection';
 import ApiEndpoint from '../models/ApiEndpoint';
 import { AuthenticatedRequest, ApiResponse } from '../types';
+import { validateHeaders } from '../utils/headers';
 import mongoose from 'mongoose';
 
 const router = Router();
@@ -10,6 +11,7 @@ const router = Router();
 interface CreateCollectionRequest {
   name: string;
   description?: string;
+  defaultHeaders?: IDefaultHeader[];
 }
 
 router.get('/', authMiddleware, async (req: AuthenticatedRequest, res: Response<ApiResponse>) => {
@@ -42,7 +44,7 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    const { name, description } = req.body as CreateCollectionRequest;
+    const { name, description, defaultHeaders } = req.body as CreateCollectionRequest;
 
     if (!name || name.trim().length === 0) {
       res.status(400).json({
@@ -65,10 +67,22 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       return;
     }
 
+    const headersToValidate = defaultHeaders ?? [];
+    const headerCheck = validateHeaders(headersToValidate, '默认请求头');
+    if (!headerCheck.valid) {
+      res.status(400).json({
+        success: false,
+        message: '默认请求头校验失败，集合未保存',
+        details: headerCheck.errors,
+      });
+      return;
+    }
+
     const collection = new Collection({
       userId: req.user._id,
       name: name.trim(),
       description: description?.trim(),
+      defaultHeaders: headerCheck.normalized,
     });
 
     await collection.save();
@@ -93,7 +107,7 @@ router.put('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Respon
     }
 
     const { id } = req.params;
-    const { name, description } = req.body as CreateCollectionRequest;
+    const { name, description, defaultHeaders } = req.body as CreateCollectionRequest;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       res.status(400).json({
@@ -136,6 +150,20 @@ router.put('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Respon
 
     if (description !== undefined) {
       collection.description = description?.trim();
+    }
+
+    // 先校验再赋值，校验失败时不改动任何字段，原配置保持不变
+    if (defaultHeaders !== undefined) {
+      const headerCheck = validateHeaders(defaultHeaders, '默认请求头');
+      if (!headerCheck.valid) {
+        res.status(400).json({
+          success: false,
+          message: '默认请求头校验失败，原配置未修改',
+          details: headerCheck.errors,
+        });
+        return;
+      }
+      collection.defaultHeaders = headerCheck.normalized;
     }
 
     await collection.save();

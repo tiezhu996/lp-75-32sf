@@ -118,6 +118,7 @@ const Workspace = () => {
           collections={collections}
           activeEnvironment={activeEnvironment}
           initialConfig={initialConfig}
+          onRefreshCollections={fetchCollections}
         />
       </Layout>
 

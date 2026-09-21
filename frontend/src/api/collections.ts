@@ -1,14 +1,16 @@
 import http from './http';
-import { ApiResponse, Collection } from '../types';
+import { ApiResponse, Collection, Header } from '../types';
 
 interface CreateCollectionParams {
   name: string;
   description?: string;
+  defaultHeaders?: Header[];
 }
 
 interface UpdateCollectionParams {
   name?: string;
   description?: string;
+  defaultHeaders?: Header[];
 }
 
 export const getCollections = async (): Promise<Collection[]> => {

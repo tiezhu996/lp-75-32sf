@@ -62,12 +62,22 @@ export const seedData = async (force: boolean = false): Promise<boolean> => {
       userId: user1._id,
       name: '示例 API',
       description: '示例接口集合，包含用户管理相关接口',
+      defaultHeaders: [
+        { key: 'X-Client', value: 'api-debugger', enabled: true },
+        { key: 'Accept', value: 'application/json', enabled: true },
+        { key: 'X-Disabled', value: 'should-not-send', enabled: false },
+      ],
     });
 
     const collection2 = new Collection({
       userId: user2._id,
       name: '示例 API',
       description: '示例接口集合，包含用户管理相关接口',
+      defaultHeaders: [
+        { key: 'X-Client', value: 'api-debugger', enabled: true },
+        { key: 'Accept', value: 'application/json', enabled: true },
+        { key: 'X-Disabled', value: 'should-not-send', enabled: false },
+      ],
     });
 
     await collection1.save();

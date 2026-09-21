@@ -30,3 +30,25 @@ export const extractEnvVariables = (text: string): string[] => {
 
   return matches;
 };
+
+/**
+ * 按当前环境展开变量，并列出展开后仍残留的 {{变量名}}（即当前环境缺失的变量）。
+ */
+export const resolveWithMissingVariables = (
+  text: string,
+  environment: Environment | null
+): { value: string; missing: string[] } => {
+  const value = replaceEnvVariables(text, environment);
+  const missing: string[] = [];
+  const regex = /\{\{\s*([^}]+?)\s*\}\}/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(value)) !== null) {
+    const name = (match[1] as string).trim();
+    if (name && !missing.includes(name)) {
+      missing.push(name);
+    }
+  }
+
+  return { value, missing };
+};
